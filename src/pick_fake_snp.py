@@ -31,7 +31,7 @@ def write_csv(input_csv, data_list):
 	"""
 	### 如果存在该文件， 直接覆盖原文件
 	csv_dir = os.path.split(input_csv)[0] ##获得csv文件的上一级文件夹， 如果该文件夹不存在， 则创建
-	if not os.path.exists(csv_dir):
+	if csv_dir != '' and not os.path.exists(csv_dir):
 		os.makedirs(csv_dir) ### 创建文件夹
 		print('Creating directory: ', csv_dir)
 
@@ -118,7 +118,7 @@ def main(args):
 
 	#### 4. 序列化line_info_dict, vcf_files_dict 到本地， 直接覆盖原文件
 	pkl_dir = os.path.split(args.pkl_file)[0]   ###文件夹不存在，则直接创建
-	if not os.path.exists(pkl_dir):
+	if pkl_dir != '' and not os.path.exists(pkl_dir):
 		os.makedirs(pkl_dir)
 		print('Creating directory: ', pkl_dir)
 		
