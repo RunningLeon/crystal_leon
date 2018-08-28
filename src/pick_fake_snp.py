@@ -92,7 +92,21 @@ def update_data(input_vcf, line_info_dict, vcf_files_dict, print_every=2000):
 		return False
 	return True
 
+def get_all_files(input_path_list, extension='.vcf'):
+		vcf_file_paths = []
+		for path in input_path_list:
+				if os.path.isfile(path) and path.endswith(extension):
+					vcf_file_paths.append(path)
+				elif os.path.isdir(path):
+					vcf_file_paths += [os.path.join(path, p) for p in os.listdir(path) if p.endswith(extension)]
+				else:
+					pass
+		print('Totall %5d vcf files found.'%(len(vcf_file_paths)))
+		return vcf_file_paths
+
+
 def main(args):
+	time_st = time.time()
 	### 1. 检测保存数据的pkl文件是否存在, 存在, load数据, 不存在, 就新建空变量
 	need_to_update = False ### 判断是否需要更新pkl文件
 	line_info_dict, vcf_files_dict = {}, {} ##不存在， 新建空变量
@@ -101,7 +115,11 @@ def main(args):
 		with open(args.pkl_file, mode='rb') as f:
 			line_info_dict, vcf_files_dict = pickle.load(f) ### 存在， 加载数据
 	### 2. 送如vcf 文件， 更新line_info_dict 和  vcf_files_dict
-	for vcf_file in args.input_vcf_list:
+	input_vcf_list = get_all_files(args.input_vcf_list)
+	if len(input_vcf_list) == 0:
+			print('No vcf file was found！')
+			return
+	for vcf_file in input_vcf_list:
 		vcf_abs_path = os.path.abspath(vcf_file) ###获得vcf文件绝对路径
 		success = update_data(vcf_abs_path, line_info_dict, vcf_files_dict, print_every=5000)
 		if success: ## 如果有一个vcf文件成功运行， 则line_info_dict, vcf_files_dict 需要更新
@@ -128,12 +146,15 @@ def main(args):
 			pickle.dump(data, f)
 			print('Updated ', args.pkl_file)
 
-	print('All done at ', datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S'))
+	time_total = (time.time()-time_st)
+	date_now = datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S')
+	print('All done at %s, totally time consuming: %10.3f seconds'%(date_now, time_total))
 
 def parse_arguments(argv):
 	parser = argparse.ArgumentParser()
-	parser.add_argument('-i', '--input-vcf-list', nargs='+', type=str, required=True,
-		help='You should input at least one vcf files')
+	parser.add_argument('input_vcf_list', nargs='+', type=str,
+		default='.',
+		help='You should input one or many vcf file or directory that needs to be processed. ')
 	parser.add_argument('-n', '--output-filename-csv', type=str, 
 		default='./data/ran_vcf_filename.csv',
 		help='Give a filename to a csv file that save vcf files you have already run, it will be a *.csv file.')
@@ -142,12 +163,10 @@ def parse_arguments(argv):
 		help='Give a filename to save same_SNP_stat pool you have already run before, it will be a *.csv file.')
 	parser.add_argument('-p', '--pkl-file', type=str, 
 		default='./data/data.pkl',
-        help='Pickle file that saves data of dict and set.')
+		help='Pickle file that saves data of dict and set.')
 	return parser.parse_args(argv)
 
 if __name__ == '__main__':
 	main(parse_arguments(sys.argv[1:]))
 
-
-     
 
