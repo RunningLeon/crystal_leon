@@ -13,7 +13,7 @@ from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
@@ -23,7 +23,7 @@ class WebWorker(object):
     
     def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide):
         driver = webdriver.Chrome()
-        # driver.implicitly_wait(30)
+        # driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
         # driver.maximize_window()
         self.driver = driver
@@ -42,9 +42,7 @@ class WebWorker(object):
         self.zoomout_xpath = "//a[@class='x-btn x-unselectable x-box-item x-toolbar-item x-btn-default-toolbar-small'][5]"
         self.page_div_xpath = '//*[@id="svw-1"]'
         self.canvas_xpath = '//canvas[@class="sv-drag sv-highlight sv-dblclick"][2]'
-        # self.blast_select_1_xpath = '//*[contains(text(), "BLAST and Primer Search")]'
         self.blast_select_1_xpath = '//span[@class="x-menu-item-text x-menu-item-text-default x-menu-item-indent x-menu-item-indent-right-arrow" and contains(text(), "BLAST and Primer Search")]'
-        # self.blast_select_2_xpath = '//*[contains(text(), "BLAST Search (Visible Range)")]'
         self.blast_select_2_xpath = '//span[@class="x-menu-item-text x-menu-item-text-default x-menu-item-indent" and contains(text(), "BLAST Search (Visible Range)")]'
         self.text_area_xpath = '//*[@id="seq"]'
         self.from_box_xpath = '//*[@id="QUERY_FROM"]'
@@ -116,20 +114,28 @@ class WebWorker(object):
         input_box.send_keys(input_data)
         time.sleep(0.5)
         input_button.click()
+
         loading_var = self.driver.find_element_by_xpath(self.load_variable_xpath)
         while loading_var.is_displayed():
             time.sleep(0.5)
+
         zoomout_button = self.get_element(self.zoomout_xpath, 5, visible=True, clickable=True)
         zoomout_button.click()
-        # div_panel = waiter.until_not(EC.staleness_of)
+
         while loading_var.is_displayed():
             time.sleep(0.5)
-        div_panel = self.get_element(self.loading_div_xpath, 2)
-        waiter.until_not(EC.staleness_of(div_panel))
-        while 'Loading' in div_panel.text:
+
+        for _ in range(20):
+            div_panel = self.get_element(self.loading_div_xpath, 2)
+            if div_panel is None:
+                continue
+            success = waiter.until_not(EC.staleness_of(div_panel))
+            if success:
+                continue
+            if not 'Loading' in div_panel.text:
+                break
             time.sleep(0.5)
 
-        # page_div.click()
         for i in range(10):
             page_div = self.get_element(self.page_div_xpath)
             act = ActionChains(self.driver)
@@ -155,10 +161,12 @@ class WebWorker(object):
                 if len(self.driver.window_handles) !=2 :
                     continue
                 break
+
         for i in range(10):
-            if len(self.driver.window_handles) != 2:
-                time.sleep(0.5)
-            pass
+            if len(self.driver.window_handles) == 2:
+                break
+            time.sleep(0.5)
+
         if len(self.driver.window_handles) == 1:
             return None
         # waiter = WebDriverWait(self.driver, 10)
@@ -168,8 +176,11 @@ class WebWorker(object):
         text_area = self.get_element(self.text_area_xpath, 3)
         from_box = self.get_element(self.from_box_xpath, 3)
         to_box = self.get_element(self.to_box_xpath, 3)
+        if text_area is None or from_box is None or to_box is None:
+            self.driver.close()
+            return None
         data = [text_area.text, from_box.get_attribute('value'), to_box.get_attribute('value')]
-
+        print('Three data: ', ', '.join(data))
         return data
 
     def parse_result(self, data):
@@ -185,7 +196,7 @@ class WebWorker(object):
         time.sleep(1)
         database_select = self.get_element(self.database_select_xpath)
         database_select.click()
-        time.sleep(2)
+        time.sleep(1)
         blast_button.click()
         table = self.get_element(self.result_table_xpath, 90, visible=True)
         result_panel = self.get_element(self.reult_panel_xpath, 90, visible=True)
@@ -216,7 +227,7 @@ class WebWorker(object):
 
 if __name__ == '__main__':
     import argparse
-    gene_li = ['16:70954945', '17:4837117', '22:25024072', '13:25467010']
+    gene_li = ['16:70954945', '17:4837117', '22:25024072', '13:25467010', '21:35822270', '6:31996297', '6:32549402', '17:44073866']
 
     worker = WebWorker()
     for data in gene_li:
