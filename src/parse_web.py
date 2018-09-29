@@ -14,15 +14,97 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+import pandas as pd
+### pip install openpyxl
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
 
+def process_sheet(sheet, target_col_name, worker, print_every):
+    col_names = list(sheet.columns)
+    if not target_col_name in col_names:
+        print('WARN: Column name %s not exists in sheet with names= %s'%(target_col_name, col_names))
+        return None
+    target_col_values = list(sheet[target_col_name])
+    result_li = []
+    nrof_row = len(target_col_values)
+    print('Totally %4d rows '%(nrof_row))
+    for i, value in enumerate(target_col_values, start=1):
+        value = str(value)
+        value_li = value.strip().split()
+        value = value_li[0].strip()
+        result = worker(value)
+        if i % print_every == 0:
+            print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_row, value, result))
+        result_li.append(result)
+    return result_li
 
+
+def process_excel(excel_path, worker, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', output_dir=None, print_every=1):
+    assert os.path.exists(excel_path), 'File not exists: ' + excel_path
+    input_dir, filename = os.path.split(excel_path)
+    if output_dir is None:
+        output_dir = os.path.join(input_dir, 'output')
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    output_excel_path = os.path.join(output_dir, filename)
+    sheets_dict = pd.read_excel(excel_path, sheet_name=None, header=0)
+    sheet_names = list(sheets_dict.keys())
+    sheet_chosen_names = sheet_names[:nrof_sheet]
+    sheets_output_dict = {name: sheets_dict[name] for name in sheet_names[nrof_sheet:]} #### rest sheet dict
+    nrof_sheet_chosen = len(sheet_chosen_names)
+    if nrof_sheet_chosen != nrof_sheet:
+        print('WARN: Only found %2d sheets in excel: %s' %(len(sheet_names), excel_path))
+
+    for k, sheet_name in enumerate(sheet_chosen_names, start=1):
+        sheet = sheets_dict[sheet_name]
+        print('Processing no. %2d/%2d sheet: %s' %(k, nrof_sheet_chosen, sheet_name))
+        result_li = process_sheet(sheet, target_col_name, worker, print_every)
+        sheet_new = sheet.copy()
+        # 添加到最后一列
+        sheet_new[target_col_name + '_result'] = result_li
+        sheets_output_dict.update({sheet_name:sheet_new})
+    ### write output excel
+    excel_writer = pd.ExcelWriter(output_excel_path)
+    try:
+        for sheet_name in sheet_names:
+            sheet = sheets_output_dict[sheet_name]
+            sheet.to_excel(excel_writer, sheet_name)
+    except Exception as e:
+        print('WARN: error when writing ' + output_excel_path)
+        print(e)
+    finally:
+        excel_writer.close()
+        print('Finishing writing ' + output_excel_path)
+
+
+    
 class WebWorker(object):
     
-    def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide):
-        driver = webdriver.Chrome()
+    def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide, executable_path='chromedriver', log_dir='./log', headless=True):
+        """
+        :param url_genomes: url
+        :param url_nucleotide: url
+        :param executable_path: chromedriver path, for windows, it should be like: 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chromedriver.exe'
+
+        Usage:
+        For windows, first install chrome browser, then check chrome version, then download webdriver. For more detailed instruction,
+            pls. check https://blog.csdn.net/u013360850/article/details/54962248
+        """
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument('--ignore-certificate-errors')
+        chrome_options.add_argument('--lang=en-us')
+        chrome_options.add_argument('--no-sandbox') # required when running as root user. otherwise you would get no sandbox errors. 
+        if headless:
+            chrome_options.add_argument('--headless')
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+        log_path = os.path.join(log_dir, 'chromedriver.log')
+        driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, 
+                service_args=['--verbose', '--log-path=' + log_path])
+
         # driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
         # driver.maximize_window()
@@ -56,12 +138,18 @@ class WebWorker(object):
         self.loading_div_xpath = '//div[@class="x-toolbar x-docked x-toolbar-default x-docked-bottom x-toolbar-docked-bottom x-toolbar-default-docked-bottom x-box-layout-ct"][1]'
         self.popup_box_xpath = '//div[@class="x-menu x-layer x-menu-default x-body x-border-box"][3]'
         self.reult_panel_xpath = '//*[@id="alignView"]'
+        self.waiting_p_xpath = '//*[@id="content"]/p[2]'
 
 
     def __call__(self, input_data):
-        data = self.parse_data(input_data)
-        result = self.parse_result(data)
-        return result
+        result = 'unknown'
+        try:
+            data = self.parse_data(input_data)
+            result = self.parse_result(data)
+        except Exception as e:
+            print(e)
+        finally:
+            return result
 
     def load_page(self, url, win_idx, timeout_sec=60):
         try:
@@ -96,15 +184,18 @@ class WebWorker(object):
                 element = waiter.until(ec, message='timeout for ec=%s'%ec)
             except TimeoutException:
                 print('Timeout when try to get element by xpath: ', xpath)
+                break
         return element
 
-    def wait_sec(self, flag, delay_sec):
-        nrof_times = int(delay_sec * 2)
-        for i in range(nrof_times):
-            pass
 
     def parse_data(self, input_data):
-        # if self.page_genomes_title not in self.driver.title:
+        window_handles = self.driver.window_handles
+        nrof_win = len(window_handles)
+        if nrof_win >= 2:
+            for i in range(1, nrof_win):
+                self.driver.switch_to_window(window_handles[i])
+                self.driver.close()
+
         self.load_page(self.url_genomes, self.win_genomes_idx)
         self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         waiter = WebDriverWait(self.driver, 10)
@@ -136,7 +227,7 @@ class WebWorker(object):
                 break
             time.sleep(0.5)
 
-        for i in range(10):
+        for _ in range(20):
             page_div = self.get_element(self.page_div_xpath)
             act = ActionChains(self.driver)
             act.context_click(page_div).perform()
@@ -180,7 +271,8 @@ class WebWorker(object):
             self.driver.close()
             return None
         data = [text_area.text, from_box.get_attribute('value'), to_box.get_attribute('value')]
-        print('Three data: ', ', '.join(data))
+        print('Three data: ', data)
+
         return data
 
     def parse_result(self, data):
@@ -198,8 +290,8 @@ class WebWorker(object):
         database_select.click()
         time.sleep(1)
         blast_button.click()
-        table = self.get_element(self.result_table_xpath, 90, visible=True)
-        result_panel = self.get_element(self.reult_panel_xpath, 90, visible=True)
+        table = self.get_element(self.result_table_xpath, 60, visible=True) ### wait no more than 90 sec
+        result_panel = self.get_element(self.reult_panel_xpath, 10, visible=True) ### wait no more than 3 sec
         if table is None:
             self.driver.close()
             return 'No result'
@@ -222,14 +314,31 @@ class WebWorker(object):
         self.driver.close()
         return result
 
-    # def __del__(self):
-    #     self.driver.quit()
+    def __del__(self):
+        if hasattr(self, 'driver'):
+            self.driver.quit()
+
+
 
 if __name__ == '__main__':
     import argparse
-    gene_li = ['16:70954945', '17:4837117', '22:25024072', '13:25467010', '21:35822270', '6:31996297', '6:32549402', '17:44073866']
+    import glob
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', '--input-dir', type=str, default='.')
+    parser.add_argument('-o', '--output-dir', type=str, default='./output')
+    parser.add_argument('-ext', '--extension', type=str, default='xlsx')
+    parser.add_argument('-a', '--aug', type=str, choices=['train', 'val'], default='val')
+    parser.add_argument('--headless', action='store_false', help='Whether to set headless mode.')
+    parser.add_argument('-exe', '--exe-path', type=str, default='chromedriver', help='For windows, input path of "chromedriver.exe"')
+    args = parser.parse_args()
+    assert os.path.exists(args.input_dir) and os.path.isdir(args.input_dir), 'Directory not exists: ' + args.input_dir
+    excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
+    nrof_excel = len(excel_paths)
+    print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
+    if nrof_excel:
+        worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
+        excel_paths = sorted(excel_paths)
 
-    worker = WebWorker()
-    for data in gene_li:
-        result = worker(data)
-        print('input: %s, result: %s'%(data, result))
+        for i, excel in enumerate(excel_paths, start=1):
+            process_excel(excel, worker, output_dir=args.output_dir)
+            print('Finishing %2d/%2d excel: %s'%(i, nrof_excel, os.path.split(excel)[-1]))
