@@ -14,7 +14,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+
 import pandas as pd
+from multiprocessing import Process, Manager
+import pickle
+
+
 ### pip install openpyxl
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
@@ -64,7 +69,8 @@ def process_excel(excel_path, worker, nrof_sheet=3, target_col_name='Chrom:Pos R
         result_li = process_sheet(sheet, target_col_name, worker, print_every)
         sheet_new = sheet.copy()
         # 添加到最后一列
-        sheet_new[target_col_name + '_result'] = result_li
+        if result_li is not None:
+            sheet_new[target_col_name + '_result'] = result_li
         sheets_output_dict.update({sheet_name:sheet_new})
     ### write output excel
     excel_writer = pd.ExcelWriter(output_excel_path)
@@ -329,16 +335,37 @@ if __name__ == '__main__':
     parser.add_argument('-ext', '--extension', type=str, default='xlsx')
     parser.add_argument('-a', '--aug', type=str, choices=['train', 'val'], default='val')
     parser.add_argument('--headless', action='store_false', help='Whether to set headless mode.')
+    parser.add_argument('-p', '--pickle-file', type=str, default='./output/keys.pkl')
     parser.add_argument('-exe', '--exe-path', type=str, default='chromedriver', help='For windows, input path of "chromedriver.exe"')
     args = parser.parse_args()
     assert os.path.exists(args.input_dir) and os.path.isdir(args.input_dir), 'Directory not exists: ' + args.input_dir
+    keys_dict = None
+    if os.path.exists(args.pickle_file):
+        with open(args.pickle_file, 'rb') as f:
+            keys_dict = pickle.load(f)
+
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
-        worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
-        excel_paths = sorted(excel_paths)
+            with Manager() as manager:
+                keys_dict_share = manager.dict()
+                if keys_dict is not None:
+                    keys_dict_share.update(keys_dict)
 
-        for i, excel in enumerate(excel_paths, start=1):
-            process_excel(excel, worker, output_dir=args.output_dir)
-            print('Finishing %2d/%2d excel: %s'%(i, nrof_excel, os.path.split(excel)[-1]))
+                try:
+                    worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
+                    excel_paths = sorted(excel_paths)
+
+                    for i, excel in enumerate(excel_paths, start=1):
+                        process_excel(excel, worker, output_dir=args.output_dir)
+                        print('Finishing %2d/%2d excel: %s'%(i, nrof_excel, os.path.split(excel)[-1]))
+
+                except Exception as e:
+                    raise
+                else:
+                    pass
+                finally:
+                    with open(args.pickle_file, 'wb') as f:
+                        pickle.dump(keys_dict_share, f)
+                    print('Finishing update keys to ' + args.pickle_file)
