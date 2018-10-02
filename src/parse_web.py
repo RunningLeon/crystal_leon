@@ -25,7 +25,7 @@ import pickle
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
 
-def process_sheet(sheet, target_col_name, worker, print_every):
+def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     col_names = list(sheet.columns)
     if not target_col_name in col_names:
         print('WARN: Column name %s not exists in sheet with names= %s'%(target_col_name, col_names))
@@ -38,14 +38,22 @@ def process_sheet(sheet, target_col_name, worker, print_every):
         value = str(value)
         value_li = value.strip().split()
         value = value_li[0].strip()
-        result = worker(value)
+        if value in share_dict:
+            result = share_dict[value]
+            if result == 'unknown':
+                result = worker(value)
+        else:
+            result = worker(value)
+        share_dict[value] = result
+        print('Update share_dict: key-value= %s : %s'%(value, result))
         if i % print_every == 0:
             print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_row, value, result))
         result_li.append(result)
     return result_li
 
 
-def process_excel(excel_path, worker, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', output_dir=None, print_every=1):
+
+def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
     assert os.path.exists(excel_path), 'File not exists: ' + excel_path
     input_dir, filename = os.path.split(excel_path)
     if output_dir is None:
@@ -66,7 +74,7 @@ def process_excel(excel_path, worker, nrof_sheet=3, target_col_name='Chrom:Pos R
     for k, sheet_name in enumerate(sheet_chosen_names, start=1):
         sheet = sheets_dict[sheet_name]
         print('Processing no. %2d/%2d sheet: %s' %(k, nrof_sheet_chosen, sheet_name))
-        result_li = process_sheet(sheet, target_col_name, worker, print_every)
+        result_li = process_sheet(sheet, share_dict, target_col_name, worker, print_every)
         sheet_new = sheet.copy()
         # 添加到最后一列
         if result_li is not None:
@@ -283,7 +291,7 @@ class WebWorker(object):
 
     def parse_result(self, data):
         if data is None:
-            return  'No data'
+            return  'unknown'
         assert len(data) == 3, len(data)
         self.load_page(self.url_nucleotide, self.win_nucleotide_idx)
         xpaths = [self.text_area_xpath, self.from_box_xpath, self.to_box_xpath]
@@ -300,7 +308,7 @@ class WebWorker(object):
         result_panel = self.get_element(self.reult_panel_xpath, 10, visible=True) ### wait no more than 3 sec
         if table is None:
             self.driver.close()
-            return 'No result'
+            return 'unknown'
 
         query_covers = table.find_elements_by_class_name('c5')
         ident_percents = table.find_elements_by_class_name('c7')
@@ -340,9 +348,17 @@ if __name__ == '__main__':
     args = parser.parse_args()
     assert os.path.exists(args.input_dir) and os.path.isdir(args.input_dir), 'Directory not exists: ' + args.input_dir
     keys_dict = None
-    if os.path.exists(args.pickle_file):
-        with open(args.pickle_file, 'rb') as f:
-            keys_dict = pickle.load(f)
+    pickle_dir = os.path.split(args.pickle_file)[0]
+    if not os.path.exists(pickle_dir):
+        os.makedirs(pickle_dir)
+
+    try:
+        if os.path.exists(args.pickle_file):
+            with open(args.pickle_file, 'rb') as f:
+                keys_dict = pickle.load(f)
+    except Exception as e:
+        print(e)
+        keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
     nrof_excel = len(excel_paths)
@@ -354,15 +370,26 @@ if __name__ == '__main__':
                     keys_dict_share.update(keys_dict)
 
                 try:
-                    worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
                     excel_paths = sorted(excel_paths)
 
-                    for i, excel in enumerate(excel_paths, start=1):
-                        process_excel(excel, worker, output_dir=args.output_dir)
-                        print('Finishing %2d/%2d excel: %s'%(i, nrof_excel, os.path.split(excel)[-1]))
+                    worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
+                    process_list = []
 
+                    for i, excel in enumerate(excel_paths):
+                        func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
+                        p = Process(target=process_excel, args=func_args)
+                        process_list.append(p)
+
+
+                    for p in process_list:
+                        p.start()
+
+                    for p in process_list:
+                        p.join()
+                        
+                    print('All done.')
                 except Exception as e:
-                    raise
+                    print(e)
                 else:
                     pass
                 finally:
