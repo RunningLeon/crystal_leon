@@ -18,12 +18,43 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 import pandas as pd
 from multiprocessing import Process, Manager
 import pickle
-
-
+import functools
+import multiprocessing
+import copy
 ### pip install openpyxl
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
+
+
+def process_data(three, output_dir, print_every=10):
+    input_pkl, share_dict, worker = three
+    with open(input_pkl, 'rb') as f:
+        input_dict = pickle.load(f)
+
+    nrof_data = len(input_dict)
+    print('Totally %s key in %s'%(nrof_data, os.path.split(input_pkl)[-1]))
+    for i,  (k,v)in enumerate(input_dict.items(), start=1):
+        if k in share_dict and share_dict[k] != 'unknown':
+            continue
+        if v == 'unknown':
+            for _ in range(3):
+                v = worker(k)
+                if v != 'unknown':
+                    break
+        share_dict[k] = v
+        print('Update share_dict: key-value= %s : %s'%(k, v))
+        if i % print_every == 0:
+            print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_data, k, v))
+    pid = os.getpid()
+    output_pkl_path = os.path.join(output_dir, 'output_%s.pkl'%(pid))
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    out = copy.deepcopy(share_dict)
+    with open(output_pkl_path, 'wb') as f:
+        pickle.dump(out, f)
+    return out
+
 
 def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     col_names = list(sheet.columns)
@@ -52,10 +83,12 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     return result_li
 
 
-
-def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
+def process_excel(excel_path, worker, share_dict=None, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
     assert os.path.exists(excel_path), 'File not exists: ' + excel_path
+    if share_dict is None:
+        share_dict = {}
     input_dir, filename = os.path.split(excel_path)
+    name, ext = os.path.splitext(filename)
     if output_dir is None:
         output_dir = os.path.join(input_dir, 'output')
     
@@ -63,6 +96,8 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
         os.makedirs(output_dir)
 
     output_excel_path = os.path.join(output_dir, filename)
+    output_pkl_path = os.path.join(output_dir, name + '.pkl')
+
     sheets_dict = pd.read_excel(excel_path, sheet_name=None, header=0)
     sheet_names = list(sheets_dict.keys())
     sheet_chosen_names = sheet_names[:nrof_sheet]
@@ -91,8 +126,9 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
         print(e)
     finally:
         excel_writer.close()
-        print('Finishing writing ' + output_excel_path)
-
+        with open(output_pkl_path, 'wb') as f:
+            pickle.dump(share_dict, f)
+        print('Finishing writing ' + output_pkl_path)
 
     
 class WebWorker(object):
@@ -121,7 +157,7 @@ class WebWorker(object):
 
         # driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
-        # driver.maximize_window()
+        driver.maximize_window()
         self.driver = driver
         # driver.execute_script("window.open('');")
         self.url_nucleotide = url_nucleotide
@@ -165,16 +201,22 @@ class WebWorker(object):
         finally:
             return result
 
-    def load_page(self, url, win_idx, timeout_sec=60):
-        try:
-            self.driver.set_page_load_timeout(timeout_sec)
-            nrof_win = len(self.driver.window_handles)
-            assert win_idx >= 0 and win_idx <= nrof_win-1, 'Number of windows is not %s, but %s'%(win_idx+1, nrof_win)
-            self.driver.switch_to_window(self.driver.window_handles[win_idx])
-            self.driver.get(url)
-        except TimeoutException:
-            print('Timeout when try to connect url: ', url)
-            sys.exit(-1)
+    def load_page(self, url, win_idx, timeout_sec=120):
+        success = True
+        for _ in range(3):
+            try:
+                self.driver.set_page_load_timeout(timeout_sec)
+                nrof_win = len(self.driver.window_handles)
+                assert win_idx >= 0 and win_idx <= nrof_win-1, 'Number of windows is not %s, but %s'%(win_idx+1, nrof_win)
+                self.driver.switch_to_window(self.driver.window_handles[win_idx])
+                self.driver.get(url)
+            except TimeoutException:
+                print('WARN: timeout when try to connect url: ', url)
+                success = False
+            else:
+                break
+                
+        return success
 
     def get_element(self, xpath, timeout_sec=1, visible=False, clickable=False, other_ec_list=None):
         ec_list = [EC.presence_of_element_located((By.XPATH, xpath))]
@@ -210,7 +252,9 @@ class WebWorker(object):
                 self.driver.switch_to_window(window_handles[i])
                 self.driver.close()
 
-        self.load_page(self.url_genomes, self.win_genomes_idx)
+        if not self.load_page(self.url_genomes, self.win_genomes_idx):
+            return None
+
         self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         waiter = WebDriverWait(self.driver, 10)
         input_button = self.driver.find_element_by_class_name(self.input_button_class_name)
@@ -293,7 +337,8 @@ class WebWorker(object):
         if data is None:
             return  'unknown'
         assert len(data) == 3, len(data)
-        self.load_page(self.url_nucleotide, self.win_nucleotide_idx)
+        if not self.load_page(self.url_nucleotide, self.win_nucleotide_idx):
+            return 'unknown'
         xpaths = [self.text_area_xpath, self.from_box_xpath, self.to_box_xpath]
         boxes = [self.get_element(x) for x in xpaths]
         blast_button = self.get_element(self.blast_button_xpath)
@@ -333,7 +378,6 @@ class WebWorker(object):
             self.driver.quit()
 
 
-
 if __name__ == '__main__':
     import argparse
     import glob
@@ -364,35 +408,47 @@ if __name__ == '__main__':
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
-            with Manager() as manager:
-                keys_dict_share = manager.dict()
-                if keys_dict is not None:
-                    keys_dict_share.update(keys_dict)
+        keys_dict_share = {}
+        if keys_dict is not None:
+            keys_dict_share.update(keys_dict)
 
-                try:
-                    excel_paths = sorted(excel_paths)
+        try:
+            excel_paths = sorted(excel_paths)
 
-                    worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
-                    process_list = []
+            # worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
+            # three_data = [(p, copy.deepcopy(keys_dict_share), w) for p, w in zip(excel_paths, worker_li)]
+            worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
+            for path in excel_paths:
+                d = process_data((path, keys_dict_share, worker), output_dir=args.output_dir)
+                dic_li = [d]
+                # cal_func = functools.partial(process_data, output_dir=args.output_dir)
+                # with multiprocessing.Pool(processes=nrof_excel) as pool:
+                #     dic_li = pool.map(cal_func, three_data)
 
-                    for i, excel in enumerate(excel_paths):
-                        func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
-                        p = Process(target=process_excel, args=func_args)
-                        process_list.append(p)
+                for dic in dic_li:
+                    for k, v in dic.items():
+                        if v != 'unknown' and k not in keys_dict_share:
+                            keys_dict_share[k] = v
+            # process_list = []
+
+            # for i, excel in enumerate(excel_paths):
+            #     func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
+            #     p = Process(target=process_excel, args=func_args)
+            #     process_list.append(p)
 
 
-                    for p in process_list:
-                        p.start()
+            # for p in process_list:
+            #     p.start()
 
-                    for p in process_list:
-                        p.join()
-                        
-                    print('All done.')
-                except Exception as e:
-                    print(e)
-                else:
-                    pass
-                finally:
-                    with open(args.pickle_file, 'wb') as f:
-                        pickle.dump(keys_dict_share, f)
-                    print('Finishing update keys to ' + args.pickle_file)
+            # for p in process_list:
+            #     p.join()
+                
+            print('All done.')
+        except Exception as e:
+            print(e)
+        else:
+            pass
+        finally:
+            with open(args.pickle_file, 'wb') as f:
+                pickle.dump(keys_dict_share, f)
+            print('Finishing update keys to ' + args.pickle_file)
