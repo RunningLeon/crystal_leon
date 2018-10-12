@@ -63,6 +63,8 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
         os.makedirs(output_dir)
 
     output_excel_path = os.path.join(output_dir, filename)
+    name = os.path.splitext(filename)[0]
+    output_pkl_path = os.path.join(output_dir, '%s_%s.pkl'%(name, os.getpid()))
     sheets_dict = pd.read_excel(excel_path, sheet_name=None, header=0)
     sheet_names = list(sheets_dict.keys())
     sheet_chosen_names = sheet_names[:nrof_sheet]
@@ -92,6 +94,9 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
     finally:
         excel_writer.close()
         print('Finishing writing ' + output_excel_path)
+        out = copy.deepcopy(share_dict)
+        with open(output_pkl_path, 'wb') as f:
+            pickle.dump(out, f)
 
 
     
@@ -364,7 +369,8 @@ if __name__ == '__main__':
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
-            with Manager() as manager:
+            with multiprocessing.Pool(processes=nrof_excel) as pool:
+                lines = pool.map(, data_dirs)
                 keys_dict_share = manager.dict()
                 if keys_dict is not None:
                     keys_dict_share.update(keys_dict)
@@ -374,7 +380,6 @@ if __name__ == '__main__':
 
                     worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
                     process_list = []
-
                     for i, excel in enumerate(excel_paths):
                         func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
                         p = Process(target=process_excel, args=func_args)
