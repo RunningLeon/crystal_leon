@@ -161,7 +161,7 @@ class WebWorker(object):
         driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, 
                 service_args=['--verbose', '--log-path=' + log_path])
 
-        # driver.implicitly_wait(10)
+        driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
         driver.maximize_window()
         self.driver = driver
@@ -258,12 +258,13 @@ class WebWorker(object):
             for i in range(1, nrof_win):
                 self.driver.switch_to_window(window_handles[i])
                 self.driver.close()
-        print(self.driver.title)
-        # if self.page_genomes_title not in self.driver.title:
-        if not self.load_page(self.url_genomes, self.win_genomes_idx):
-            return None
+        if self.page_genomes_title not in self.driver.title:
+            if not self.load_page(self.url_genomes, self.win_genomes_idx):
+                return None
+        else:
+            self.driver.refresh()
 
-        self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
+        # self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         waiter = WebDriverWait(self.driver, 10)
         input_button = self.driver.find_element_by_class_name(self.input_button_class_name)
         input_box = self.get_element(self.input_box_xpath)
@@ -271,18 +272,20 @@ class WebWorker(object):
         input_box.send_keys(input_data)
         time.sleep(0.5)
         input_button.click()
-
+        time.sleep(0.5)
+        
         loading_var = self.driver.find_element_by_xpath(self.load_variable_xpath)
         while loading_var.is_displayed():
             time.sleep(0.5)
-
+            
+        time.sleep(0.5)
         zoomout_button = self.get_element(self.zoomout_xpath, 5, visible=True, clickable=True)
         zoomout_button.click()
 
         while loading_var.is_displayed():
             time.sleep(0.5)
-        time.sleep(1.5)
-        for _ in range(20):
+        time.sleep(0.5)
+        for _ in range(10):
             div_panel = self.get_element(self.loading_div_xpath, 2)
             if div_panel is None:
                 continue
@@ -293,7 +296,7 @@ class WebWorker(object):
                 break
             time.sleep(0.5)
 
-        for _ in range(20):
+        for _ in range(10):
             page_div = self.get_element(self.page_div_xpath)
             act = ActionChains(self.driver)
             act.context_click(page_div).perform()
@@ -330,9 +333,9 @@ class WebWorker(object):
         # waiter.until(EC.new_window_is_opened(self.driver.window_handles))
 
         self.driver.switch_to_window(self.driver.window_handles[1]) ### focus on new page
-        text_area = self.get_element(self.text_area_xpath, 3)
-        from_box = self.get_element(self.from_box_xpath, 3)
-        to_box = self.get_element(self.to_box_xpath, 3)
+        text_area = self.get_element(self.text_area_xpath, 60)
+        from_box = self.get_element(self.from_box_xpath, 1)
+        to_box = self.get_element(self.to_box_xpath, 1)
         if text_area is None or from_box is None or to_box is None:
             self.driver.close()
             return None
