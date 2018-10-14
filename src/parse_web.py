@@ -21,6 +21,7 @@ import pickle
 import functools
 import multiprocessing
 import copy
+import traceback
 ### pip install openpyxl
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
@@ -50,9 +51,9 @@ def process_data(three, output_dir, print_every=10):
     output_pkl_path = os.path.join(output_dir, 'output_%s.pkl'%(pid))
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    out = copy.deepcopy(share_dict)
-    with open(output_pkl_path, 'wb') as f:
-        pickle.dump(out, f)
+    # out = copy.deepcopy(share_dict)
+    # with open(output_pkl_path, 'wb') as f:
+    #     pickle.dump(out, f)
     return out
 
 
@@ -198,12 +199,13 @@ class WebWorker(object):
             result = self.parse_result(data)
         except Exception as e:
             print(e)
+            traceback.print_stack()
         finally:
             return result
 
     def load_page(self, url, win_idx, timeout_sec=120):
         success = True
-        for _ in range(3):
+        for _ in range(2):
             try:
                 self.driver.set_page_load_timeout(timeout_sec)
                 nrof_win = len(self.driver.window_handles)
@@ -251,7 +253,8 @@ class WebWorker(object):
             for i in range(1, nrof_win):
                 self.driver.switch_to_window(window_handles[i])
                 self.driver.close()
-
+        print(self.driver.title)
+        # if self.page_genomes_title not in self.driver.title:
         if not self.load_page(self.url_genomes, self.win_genomes_idx):
             return None
 
@@ -371,6 +374,10 @@ class WebWorker(object):
             else:
                 result = ident
         self.driver.close()
+        window_handles = self.driver.window_handles
+        nrof_win = len(window_handles)
+        if nrof_win == 1:
+            self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         return result
 
     def __del__(self):
@@ -401,7 +408,7 @@ if __name__ == '__main__':
             with open(args.pickle_file, 'rb') as f:
                 keys_dict = pickle.load(f)
     except Exception as e:
-        print(e)
+        print('Loading error: ', e)
         keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
@@ -410,6 +417,7 @@ if __name__ == '__main__':
     if nrof_excel:
         keys_dict_share = {}
         if keys_dict is not None:
+            print('update keys_dict')
             keys_dict_share.update(keys_dict)
 
         try:
@@ -417,18 +425,27 @@ if __name__ == '__main__':
 
             # worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
             # three_data = [(p, copy.deepcopy(keys_dict_share), w) for p, w in zip(excel_paths, worker_li)]
+            keys_copy = copy.deepcopy(keys_dict_share)
             worker = WebWorker(executable_path=args.exe_path, headless=args.headless)
-            for path in excel_paths:
-                d = process_data((path, keys_dict_share, worker), output_dir=args.output_dir)
-                dic_li = [d]
-                # cal_func = functools.partial(process_data, output_dir=args.output_dir)
-                # with multiprocessing.Pool(processes=nrof_excel) as pool:
-                #     dic_li = pool.map(cal_func, three_data)
+            i = 0
+            for k, v in keys_copy.items():
+                if v == 'unknown':
+                    print('before%s, %s'%(k, v))
+                    v = worker(k)
+                    if v != 'unknown':
+                        keys_dict_share[k]=v
+                        print('input after: %s, %s'%(k, v))
+            # for path in excel_paths:
+            #     d = process_data((path, keys_dict_share, worker), output_dir=args.output_dir)
+            #     dic_li = [d]
+            #     # cal_func = functools.partial(process_data, output_dir=args.output_dir)
+            #     # with multiprocessing.Pool(processes=nrof_excel) as pool:
+            #     #     dic_li = pool.map(cal_func, three_data)
 
-                for dic in dic_li:
-                    for k, v in dic.items():
-                        if v != 'unknown' and k not in keys_dict_share:
-                            keys_dict_share[k] = v
+            #     for dic in dic_li:
+            #         for k, v in dic.items():
+            #             if v != 'unknown' and k not in keys_dict_share:
+            #                 keys_dict_share[k] = v
             # process_list = []
 
             # for i, excel in enumerate(excel_paths):
@@ -446,6 +463,7 @@ if __name__ == '__main__':
             print('All done.')
         except Exception as e:
             print(e)
+            traceback.print_stack()
         else:
             pass
         finally:
