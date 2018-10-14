@@ -7,6 +7,8 @@ from __future__ import print_function
 import os
 import sys
 import time
+import copy
+
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver import ActionChains
@@ -97,6 +99,7 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
         out = copy.deepcopy(share_dict)
         with open(output_pkl_path, 'wb') as f:
             pickle.dump(out, f)
+    return out
 
 
     
@@ -126,7 +129,7 @@ class WebWorker(object):
 
         # driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
-        # driver.maximize_window()
+        driver.maximize_window()
         self.driver = driver
         # driver.execute_script("window.open('');")
         self.url_nucleotide = url_nucleotide
@@ -170,7 +173,7 @@ class WebWorker(object):
         finally:
             return result
 
-    def load_page(self, url, win_idx, timeout_sec=60):
+    def load_page(self, url, win_idx, timeout_sec=120):
         try:
             self.driver.set_page_load_timeout(timeout_sec)
             nrof_win = len(self.driver.window_handles)
@@ -234,7 +237,7 @@ class WebWorker(object):
 
         while loading_var.is_displayed():
             time.sleep(0.5)
-
+        time.sleep(1.5)
         for _ in range(20):
             div_panel = self.get_element(self.loading_div_xpath, 2)
             if div_panel is None:
@@ -309,7 +312,7 @@ class WebWorker(object):
         database_select.click()
         time.sleep(1)
         blast_button.click()
-        table = self.get_element(self.result_table_xpath, 60, visible=True) ### wait no more than 90 sec
+        table = self.get_element(self.result_table_xpath, 120, visible=True) ### wait no more than 90 sec
         result_panel = self.get_element(self.reult_panel_xpath, 10, visible=True) ### wait no more than 3 sec
         if table is None:
             self.driver.close()
@@ -366,38 +369,37 @@ if __name__ == '__main__':
         keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
+    excel_paths = excel_paths[:1]
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
-            with multiprocessing.Pool(processes=nrof_excel) as pool:
-                lines = pool.map(, data_dirs)
-                keys_dict_share = manager.dict()
-                if keys_dict is not None:
-                    keys_dict_share.update(keys_dict)
+            # with multiprocessing.Pool(processes=nrof_excel) as pool:
+            #     lines = pool.map(, data_dirs)
+            keys_dict_share = {}
+            if keys_dict is not None:
+                keys_dict_share.update(keys_dict)
+            excel_paths = sorted(excel_paths)
+            try:
 
-                try:
-                    excel_paths = sorted(excel_paths)
+                worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
+                process_list = []
+                for i, excel in enumerate(excel_paths):
+                    func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
+                    p = Process(target=process_excel, args=func_args)
+                    process_list.append(p)
 
-                    worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
-                    process_list = []
-                    for i, excel in enumerate(excel_paths):
-                        func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
-                        p = Process(target=process_excel, args=func_args)
-                        process_list.append(p)
+                for p in process_list:
+                    p.start()
 
-
-                    for p in process_list:
-                        p.start()
-
-                    for p in process_list:
-                        p.join()
-                        
-                    print('All done.')
-                except Exception as e:
-                    print(e)
-                else:
-                    pass
-                finally:
-                    with open(args.pickle_file, 'wb') as f:
-                        pickle.dump(keys_dict_share, f)
-                    print('Finishing update keys to ' + args.pickle_file)
+                for p in process_list:
+                    p.join()
+                    
+                print('All done.')
+            except Exception as e:
+                print(e)
+            else:
+                pass
+            finally:
+                with open(args.pickle_file, 'wb') as f:
+                    pickle.dump(keys_dict_share, f)
+                print('Finishing update keys to ' + args.pickle_file)
