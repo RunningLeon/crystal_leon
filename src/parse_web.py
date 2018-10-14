@@ -80,8 +80,9 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
                 result = worker(value)
         else:
             result = worker(value)
-        share_dict[value] = result
-        print('Update share_dict: key-value= %s : %s'%(value, result))
+        if result != 'unknown':
+            share_dict[value] = result
+            print('Update share_dict: key-value= %s : %s'%(value, result))
         if i % print_every == 0:
             print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_row, value, result))
         result_li.append(result)
@@ -138,7 +139,7 @@ def process_excel(excel_path, share_dict=None, exe_path='chromedriver', headless
         # with open(output_pkl_path, 'wb') as f:
         #     pickle.dump(share_dict, f)
         # print('Finishing writing ' + output_pkl_path)
-    return share_dict
+        return share_dict
 
 
     
@@ -150,7 +151,7 @@ def partial_wraper(input_args):
 
 class WebWorker(object):
     
-    def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide, executable_path='chromedriver', log_dir='./log', headless=True):
+    def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide, executable_path='chromedriver', headless=True):
         """
         :param url_genomes: url
         :param url_nucleotide: url
@@ -169,12 +170,11 @@ class WebWorker(object):
         chrome_options.add_argument('--no-sandbox') # required when running as root user. otherwise you would get no sandbox errors. 
         if headless:
             chrome_options.add_argument('--headless')
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-        log_path = os.path.join(log_dir, 'chromedriver.log')
-        log_path = 'NUL'
-        driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, #service_log_path='NUL')
-                service_args=['--log-path=' + log_path])
+        if 'win' in sys.platform:
+            log_path = 'NUL'
+        else:
+            log_path = '/dev/null'
+        driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, service_log_path=log_path)
 
         driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
@@ -184,10 +184,6 @@ class WebWorker(object):
         self.url_nucleotide = url_nucleotide
         self.url_genomes = url_genomes
 
-        self.win_genomes_idx = 0
-        self.win_nucleotide_idx = 1
-        
-        self.load_page(url_genomes, self.win_genomes_idx)
 
         self.page_genomes_title = '1000 Genomes Browser'
         self.page_nucleotide_title = 'Nucleotide BLAST'
@@ -223,14 +219,16 @@ class WebWorker(object):
         finally:
             return result
 
-    def load_page(self, url, win_idx, timeout_sec=120):
+    def load_page(self, url, tab_index=0, timeout_sec=120):
         success = True
         for _ in range(2):
             try:
                 self.driver.set_page_load_timeout(timeout_sec)
-                nrof_win = len(self.driver.window_handles)
-                assert win_idx >= 0 and win_idx <= nrof_win-1, 'Number of windows is not %s, but %s'%(win_idx+1, nrof_win)
-                self.driver.switch_to_window(self.driver.window_handles[win_idx])
+                nrof_tab = len(self.driver.window_handles)
+                if nrof_tab > tab_index + 1:
+                    for x in range(tab_index + 1, nrof_tab):
+                        self.driver.find_element_by_tag_name('body').send_keys(Keys.COMMAND + 'W')
+                self.driver.switch_to_window(self.driver.window_handles[tab_index])
                 self.driver.get(url)
             except TimeoutException:
                 print('WARN: timeout when try to connect url: ', url)
@@ -267,15 +265,15 @@ class WebWorker(object):
 
 
     def parse_data(self, input_data):
-        window_handles = self.driver.window_handles
-        nrof_win = len(window_handles)
-        if nrof_win >= 2:
-            for i in range(1, nrof_win):
-                self.driver.switch_to_window(window_handles[i])
-                self.driver.close()
-            self.driver.switch_to_window(window_handles[self.win_genomes_idx])
+        # window_handles = self.driver.window_handles
+        # nrof_tab = len(window_handles)
+        # if nrof_tab >= 2:
+        #     for i in range(1, nrof_tab):
+        #         self.driver.switch_to_window(window_handles[i])
+        #         self.driver.close()
+        #     self.driver.switch_to_window(window_handles[0])
         if self.page_genomes_title not in self.driver.title:
-            if not self.load_page(self.url_genomes, self.win_genomes_idx):
+            if not self.load_page(self.url_genomes):
                 return None
         else:
             self.driver.refresh()
@@ -333,8 +331,8 @@ class WebWorker(object):
                 act.move_to_element(blast_2)
                 time.sleep(0.5)
                 blast_2.click()
-                time.sleep(3)
-                if len(self.driver.window_handles) !=2 :
+                time.sleep(0.5)
+                if len(self.driver.window_handles) != 2 :
                     continue
                 break
 
@@ -362,7 +360,7 @@ class WebWorker(object):
         if data is None:
             return  'unknown'
         assert len(data) == 3, len(data)
-        if not self.load_page(self.url_nucleotide, self.win_nucleotide_idx):
+        if not self.load_page(self.url_nucleotide, tab_index=1):
             return 'unknown'
         xpaths = [self.text_area_xpath, self.from_box_xpath, self.to_box_xpath]
         boxes = [self.get_element(x) for x in xpaths]
@@ -397,9 +395,9 @@ class WebWorker(object):
                 result = ident
         self.driver.close()
         window_handles = self.driver.window_handles
-        nrof_win = len(window_handles)
-        if nrof_win == 1:
-            self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
+        nrof_tab = len(window_handles)
+        if nrof_tab == 1:
+            self.driver.switch_to_window(self.driver.window_handles[0])
         return result
 
     def __del__(self):
@@ -413,12 +411,13 @@ if __name__ == '__main__':
     import glob
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input-dir', type=str, default='.')
-    parser.add_argument('-o', '--output-dir', type=str, default='./output')
+    parser.add_argument('-o', '--output-dir', type=str, default='../output')
     parser.add_argument('-ext', '--extension', type=str, default='xlsx')
     parser.add_argument('-a', '--aug', type=str, choices=['train', 'val'], default='val')
     parser.add_argument('--headless', action='store_false', help='Whether to set headless mode.')
-    parser.add_argument('-p', '--pickle-file', type=str, default='./output/keys.pkl')
+    parser.add_argument('-p', '--pickle-file', type=str, default='../output/keys.pkl')
     parser.add_argument('-exe', '--exe-path', type=str, default='chromedriver', help='For windows, input path of "chromedriver.exe"')
+    parser.add_argument('--test', action='store_true', help='--test to processes only 1 excel in 1 process.')
     args = parser.parse_args()
     assert os.path.exists(args.input_dir) and os.path.isdir(args.input_dir), 'Directory not exists: ' + args.input_dir
     keys_dict = None
@@ -436,6 +435,8 @@ if __name__ == '__main__':
         keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
+    if args.test:
+        excel_paths = excel_paths[:1]
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
