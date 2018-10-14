@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.webdriver.chrome.options import Options
 
 import pandas as pd
 from multiprocessing import Process, Manager
@@ -59,6 +60,7 @@ def process_data(three, output_dir, print_every=10):
     return out
 
 
+
 def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     col_names = list(sheet.columns)
     if not target_col_name in col_names:
@@ -86,8 +88,10 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     return result_li
 
 
-def process_excel(excel_path, worker, share_dict=None, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
+
+def process_excel(excel_path, share_dict=None, exe_path='chromedriver', headless=True, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
     assert os.path.exists(excel_path), 'File not exists: ' + excel_path
+    worker = WebWorker(executable_path=exe_path, headless=headless)
     if share_dict is None:
         share_dict = {}
     input_dir, filename = os.path.split(excel_path)
@@ -131,12 +135,19 @@ def process_excel(excel_path, worker, share_dict=None, output_dir=None, nrof_she
         excel_writer.close()
 
         print('Finishing writing ' + output_excel_path)
-        with open(output_pkl_path, 'wb') as f:
-            pickle.dump(share_dict, f)
-        print('Finishing writing ' + output_pkl_path)
+        # with open(output_pkl_path, 'wb') as f:
+        #     pickle.dump(share_dict, f)
+        # print('Finishing writing ' + output_pkl_path)
     return share_dict
 
+
     
+def partial_wraper(input_args):
+    excel_path, share_dict, exe_path, headless, output_dir = input_args
+    return process_excel(excel_path, share_dict, exe_path, headless, output_dir)
+
+
+
 class WebWorker(object):
     
     def __init__(self, url_genomes=URL_genomes, url_nucleotide=URL_nucleotide, executable_path='chromedriver', log_dir='./log', headless=True):
@@ -150,16 +161,20 @@ class WebWorker(object):
             pls. check https://blog.csdn.net/u013360850/article/details/54962248
         """
         chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument('--start-maximized')
+        chrome_options.add_argument('--disable-logging')
         chrome_options.add_argument('--ignore-certificate-errors')
         chrome_options.add_argument('--lang=en-us')
+        chrome_options.add_argument('--log-level=3')
         chrome_options.add_argument('--no-sandbox') # required when running as root user. otherwise you would get no sandbox errors. 
         if headless:
             chrome_options.add_argument('--headless')
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         log_path = os.path.join(log_dir, 'chromedriver.log')
-        driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, 
-                service_args=['--verbose', '--log-path=' + log_path])
+        log_path = 'NUL'
+        driver = webdriver.Chrome(executable_path, chrome_options=chrome_options, #service_log_path='NUL')
+                service_args=['--log-path=' + log_path])
 
         driver.implicitly_wait(10)
         # driver.set_window_size(1280, 960)
@@ -258,13 +273,13 @@ class WebWorker(object):
             for i in range(1, nrof_win):
                 self.driver.switch_to_window(window_handles[i])
                 self.driver.close()
+            self.driver.switch_to_window(window_handles[self.win_genomes_idx])
         if self.page_genomes_title not in self.driver.title:
             if not self.load_page(self.url_genomes, self.win_genomes_idx):
                 return None
         else:
             self.driver.refresh()
 
-        # self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         waiter = WebDriverWait(self.driver, 10)
         input_button = self.driver.find_element_by_class_name(self.input_button_class_name)
         input_box = self.get_element(self.input_box_xpath)
@@ -285,6 +300,7 @@ class WebWorker(object):
         while loading_var.is_displayed():
             time.sleep(0.5)
         time.sleep(0.5)
+
         for _ in range(10):
             div_panel = self.get_element(self.loading_div_xpath, 2)
             if div_panel is None:
@@ -329,18 +345,16 @@ class WebWorker(object):
 
         if len(self.driver.window_handles) == 1:
             return None
-        # waiter = WebDriverWait(self.driver, 10)
-        # waiter.until(EC.new_window_is_opened(self.driver.window_handles))
 
         self.driver.switch_to_window(self.driver.window_handles[1]) ### focus on new page
         text_area = self.get_element(self.text_area_xpath, 60)
         from_box = self.get_element(self.from_box_xpath, 1)
         to_box = self.get_element(self.to_box_xpath, 1)
+
         if text_area is None or from_box is None or to_box is None:
             self.driver.close()
             return None
         data = [text_area.text, from_box.get_attribute('value'), to_box.get_attribute('value')]
-        print('Three data: ', data)
 
         return data
 
@@ -389,8 +403,9 @@ class WebWorker(object):
         return result
 
     def __del__(self):
-        if hasattr(self, 'driver'):
-            self.driver.quit()
+        # if hasattr(self, 'driver'):
+        #     self.driver.quit()
+        pass
 
 
 if __name__ == '__main__':
@@ -407,6 +422,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     assert os.path.exists(args.input_dir) and os.path.isdir(args.input_dir), 'Directory not exists: ' + args.input_dir
     keys_dict = None
+
     pickle_dir = os.path.split(args.pickle_file)[0]
     if not os.path.exists(pickle_dir):
         os.makedirs(pickle_dir)
@@ -420,31 +436,21 @@ if __name__ == '__main__':
         keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
-    excel_paths = excel_paths[:1]
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
-            # with multiprocessing.Pool(processes=nrof_excel) as pool:
-            #     lines = pool.map(, data_dirs)
             keys_dict_share = {}
             if keys_dict is not None:
                 keys_dict_share.update(keys_dict)
             excel_paths = sorted(excel_paths)
             try:
-
-                worker_li = [WebWorker(executable_path=args.exe_path, headless=args.headless) for _ in range(nrof_excel)]
-                process_list = []
-                for i, excel in enumerate(excel_paths):
-                    func_args = (excel, worker_li[i], keys_dict_share, args.output_dir)
-                    p = Process(target=process_excel, args=func_args)
-                    process_list.append(p)
-
-                for p in process_list:
-                    p.start()
-
-                for p in process_list:
-                    p.join()
-                    
+                func_args = [(excel, keys_dict_share, args.exe_path, args.headless, args.output_dir) for excel in excel_paths]
+                with multiprocessing.Pool(processes=nrof_excel) as pool:
+                    results = pool.map(partial_wraper, func_args)
+                for res in results:
+                    for k, v in res.items():
+                        if v != 'unknown':
+                            keys_dict_share[k] = v                     
                 print('All done.')
             except Exception as e:
                 print(e)
