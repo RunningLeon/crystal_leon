@@ -20,12 +20,44 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 import pandas as pd
 from multiprocessing import Process, Manager
 import pickle
-
-
+import functools
+import multiprocessing
+import copy
+import traceback
 ### pip install openpyxl
 
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
+
+
+def process_data(three, output_dir, print_every=10):
+    input_pkl, share_dict, worker = three
+    with open(input_pkl, 'rb') as f:
+        input_dict = pickle.load(f)
+
+    nrof_data = len(input_dict)
+    print('Totally %s key in %s'%(nrof_data, os.path.split(input_pkl)[-1]))
+    for i,  (k,v)in enumerate(input_dict.items(), start=1):
+        if k in share_dict and share_dict[k] != 'unknown':
+            continue
+        if v == 'unknown':
+            for _ in range(3):
+                v = worker(k)
+                if v != 'unknown':
+                    break
+        share_dict[k] = v
+        print('Update share_dict: key-value= %s : %s'%(k, v))
+        if i % print_every == 0:
+            print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_data, k, v))
+    pid = os.getpid()
+    output_pkl_path = os.path.join(output_dir, 'output_%s.pkl'%(pid))
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    # out = copy.deepcopy(share_dict)
+    # with open(output_pkl_path, 'wb') as f:
+    #     pickle.dump(out, f)
+    return out
+
 
 def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     col_names = list(sheet.columns)
@@ -54,10 +86,12 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
     return result_li
 
 
-
-def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
+def process_excel(excel_path, worker, share_dict=None, output_dir=None, nrof_sheet=3, target_col_name='Chrom:Pos Ref/Alt', print_every=10):
     assert os.path.exists(excel_path), 'File not exists: ' + excel_path
+    if share_dict is None:
+        share_dict = {}
     input_dir, filename = os.path.split(excel_path)
+    name, ext = os.path.splitext(filename)
     if output_dir is None:
         output_dir = os.path.join(input_dir, 'output')
     
@@ -95,12 +129,12 @@ def process_excel(excel_path, worker, share_dict, output_dir=None, nrof_sheet=3,
         print(e)
     finally:
         excel_writer.close()
-        print('Finishing writing ' + output_excel_path)
-        out = copy.deepcopy(share_dict)
-        with open(output_pkl_path, 'wb') as f:
-            pickle.dump(out, f)
-    return out
 
+        print('Finishing writing ' + output_excel_path)
+        with open(output_pkl_path, 'wb') as f:
+            pickle.dump(share_dict, f)
+        print('Finishing writing ' + output_pkl_path)
+    return share_dict
 
     
 class WebWorker(object):
@@ -170,19 +204,26 @@ class WebWorker(object):
             result = self.parse_result(data)
         except Exception as e:
             print(e)
+            traceback.print_stack()
         finally:
             return result
 
     def load_page(self, url, win_idx, timeout_sec=120):
-        try:
-            self.driver.set_page_load_timeout(timeout_sec)
-            nrof_win = len(self.driver.window_handles)
-            assert win_idx >= 0 and win_idx <= nrof_win-1, 'Number of windows is not %s, but %s'%(win_idx+1, nrof_win)
-            self.driver.switch_to_window(self.driver.window_handles[win_idx])
-            self.driver.get(url)
-        except TimeoutException:
-            print('Timeout when try to connect url: ', url)
-            sys.exit(-1)
+        success = True
+        for _ in range(2):
+            try:
+                self.driver.set_page_load_timeout(timeout_sec)
+                nrof_win = len(self.driver.window_handles)
+                assert win_idx >= 0 and win_idx <= nrof_win-1, 'Number of windows is not %s, but %s'%(win_idx+1, nrof_win)
+                self.driver.switch_to_window(self.driver.window_handles[win_idx])
+                self.driver.get(url)
+            except TimeoutException:
+                print('WARN: timeout when try to connect url: ', url)
+                success = False
+            else:
+                break
+                
+        return success
 
     def get_element(self, xpath, timeout_sec=1, visible=False, clickable=False, other_ec_list=None):
         ec_list = [EC.presence_of_element_located((By.XPATH, xpath))]
@@ -217,8 +258,11 @@ class WebWorker(object):
             for i in range(1, nrof_win):
                 self.driver.switch_to_window(window_handles[i])
                 self.driver.close()
+        print(self.driver.title)
+        # if self.page_genomes_title not in self.driver.title:
+        if not self.load_page(self.url_genomes, self.win_genomes_idx):
+            return None
 
-        self.load_page(self.url_genomes, self.win_genomes_idx)
         self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         waiter = WebDriverWait(self.driver, 10)
         input_button = self.driver.find_element_by_class_name(self.input_button_class_name)
@@ -301,7 +345,8 @@ class WebWorker(object):
         if data is None:
             return  'unknown'
         assert len(data) == 3, len(data)
-        self.load_page(self.url_nucleotide, self.win_nucleotide_idx)
+        if not self.load_page(self.url_nucleotide, self.win_nucleotide_idx):
+            return 'unknown'
         xpaths = [self.text_area_xpath, self.from_box_xpath, self.to_box_xpath]
         boxes = [self.get_element(x) for x in xpaths]
         blast_button = self.get_element(self.blast_button_xpath)
@@ -334,12 +379,15 @@ class WebWorker(object):
             else:
                 result = ident
         self.driver.close()
+        window_handles = self.driver.window_handles
+        nrof_win = len(window_handles)
+        if nrof_win == 1:
+            self.driver.switch_to_window(self.driver.window_handles[self.win_genomes_idx])
         return result
 
     def __del__(self):
         if hasattr(self, 'driver'):
             self.driver.quit()
-
 
 
 if __name__ == '__main__':
@@ -365,7 +413,7 @@ if __name__ == '__main__':
             with open(args.pickle_file, 'rb') as f:
                 keys_dict = pickle.load(f)
     except Exception as e:
-        print(e)
+        print('Loading error: ', e)
         keys_dict = None
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
@@ -397,6 +445,7 @@ if __name__ == '__main__':
                 print('All done.')
             except Exception as e:
                 print(e)
+                traceback.print_stack()
             else:
                 pass
             finally:
