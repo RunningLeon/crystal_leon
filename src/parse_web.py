@@ -86,7 +86,7 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
             print(e)
             traceback.print_stack()
 
-        if result != 'unknown' and (not value in share_dict or share_dict[value] != 'unknown'):
+        if result != 'unknown' and (not value in share_dict or share_dict[value] == 'unknown'):
             share_dict[value] = result
             print('Update share_dict: key-value= %s : %s'%(value, result))
         if i % print_every == 0:
