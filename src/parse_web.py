@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import copy
+import random
 
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
@@ -19,7 +20,6 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 from selenium.webdriver.chrome.options import Options
 
 import pandas as pd
-from multiprocessing import Process, Manager
 import pickle
 import functools
 import multiprocessing
@@ -27,41 +27,41 @@ import copy
 import traceback
 ### pip install openpyxl
 
+
 URL_genomes = 'https://www.ncbi.nlm.nih.gov/variation/tools/1000genomes/'
 URL_nucleotide = 'https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE=MegaBlast&PROGRAM=blastn&PAGE_TYPE=BlastSearch&BLAST_SPEC=OGP__9606__9558'
 
 
-def process_data(three, output_dir, print_every=10):
-    input_pkl, share_dict, worker = three
-    with open(input_pkl, 'rb') as f:
-        input_dict = pickle.load(f)
 
-    nrof_data = len(input_dict)
-    print('Totally %s key in %s'%(nrof_data, os.path.split(input_pkl)[-1]))
-    for i,  (k,v)in enumerate(input_dict.items(), start=1):
-        if k in share_dict and share_dict[k] != 'unknown':
-            continue
-        if v == 'unknown':
-            for _ in range(3):
-                v = worker(k)
-                if v != 'unknown':
-                    break
-        share_dict[k] = v
-        print('Update share_dict: key-value= %s : %s'%(k, v))
-        if i % print_every == 0:
-            print('No. %3d/%3d, input: %s, result: %s'%(i, nrof_data, k, v))
-    pid = os.getpid()
-    output_pkl_path = os.path.join(output_dir, 'output_%s.pkl'%(pid))
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    # out = copy.deepcopy(share_dict)
-    # with open(output_pkl_path, 'wb') as f:
-    #     pickle.dump(out, f)
-    return out
+def update_from_pkl(share_dict, data_dir, file_ext='.pkl'):
+    file_paths = glob.glob(os.path.join(data_dir, '*' + file_ext))
+    nrof_file  = len(file_paths)
+    if nrof_file:
+        for f_path in file_paths:
+            try:
+                with open(f_path, 'rb') as f:
+                    dic = pickle.load(f)
+                    for k, v in dic.items():
+                        if v == 'unknown':
+                            continue
+                        if k in share_dict:
+                            if share_dict[k] != 'unknown':
+                                continue
+                            else:
+                                share_dict[k] = v
+                        else:
+                            share_dict[k] = v
+                ### delete file
+                os.remove(f_path)
+            except Exception as e:
+                print('Reading error for pkl file: ', f_path)
+    return share_dict
 
 
 
 def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
+    if not isinstance(sheet, pd.DataFrame):
+        return None
     col_names = list(sheet.columns)
     if not target_col_name in col_names:
         print('WARN: Column name %s not exists in sheet with names= %s'%(target_col_name, col_names))
@@ -74,13 +74,19 @@ def process_sheet(sheet, share_dict, target_col_name, worker, print_every):
         value = str(value)
         value_li = value.strip().split()
         value = value_li[0].strip()
-        if value in share_dict:
-            result = share_dict[value]
-            if result == 'unknown':
+        result = 'unknown'
+        try:
+            if value in share_dict:
+                result = share_dict[value]
+                if result == 'unknown':
+                    result = worker(value)
+            else:
                 result = worker(value)
-        else:
-            result = worker(value)
-        if result != 'unknown':
+        except Exception as e:
+            print(e)
+            traceback.print_stack()
+
+        if result != 'unknown' and (not value in share_dict or share_dict[value] != 'unknown'):
             share_dict[value] = result
             print('Update share_dict: key-value= %s : %s'%(value, result))
         if i % print_every == 0:
@@ -136,9 +142,9 @@ def process_excel(excel_path, share_dict=None, exe_path='chromedriver', headless
         excel_writer.close()
 
         print('Finishing writing ' + output_excel_path)
-        # with open(output_pkl_path, 'wb') as f:
-        #     pickle.dump(share_dict, f)
-        # print('Finishing writing ' + output_pkl_path)
+        with open(output_pkl_path, 'wb') as f:
+            pickle.dump(share_dict, f)
+        print('Finishing writing ' + output_pkl_path)
         return share_dict
 
 
@@ -215,20 +221,30 @@ class WebWorker(object):
             result = self.parse_result(data)
         except Exception as e:
             print(e)
+            msg = str(e)
+            closed_win_msg = 'Message: no such window: target window already closed'
+            if closed_win_msg in msg:
+                window_handles = self.driver.window_handles
+                nrof_tab = len(window_handles)
+                if nrof_tab == 1:
+                    self.driver.switch_to_window(window_handles[0])
             traceback.print_stack()
         finally:
             return result
 
     def load_page(self, url, tab_index=0, timeout_sec=120):
         success = True
-        for _ in range(2):
+        for _ in range(3):
             try:
                 self.driver.set_page_load_timeout(timeout_sec)
                 nrof_tab = len(self.driver.window_handles)
+                window_handles = self.driver.window_handles
                 if nrof_tab > tab_index + 1:
                     for x in range(tab_index + 1, nrof_tab):
-                        self.driver.find_element_by_tag_name('body').send_keys(Keys.COMMAND + 'W')
-                self.driver.switch_to_window(self.driver.window_handles[tab_index])
+                        self.driver.switch_to_window(window_handles[x])
+                        self.driver.close()
+                        print('Closing %s win'%x)
+                self.driver.switch_to_window(window_handles[tab_index])
                 self.driver.get(url)
             except TimeoutException:
                 print('WARN: timeout when try to connect url: ', url)
@@ -238,9 +254,12 @@ class WebWorker(object):
                 
         return success
 
-    def get_element(self, xpath, timeout_sec=1, visible=False, clickable=False, other_ec_list=None):
-        ec_list = [EC.presence_of_element_located((By.XPATH, xpath))]
 
+    def get_element(self, xpath, timeout_sec=1, presence=True, visible=False, clickable=False, other_ec_list=None):
+
+        ec_list = []
+        if presence:
+            ec_list.append(EC.presence_of_element_located((By.XPATH, xpath)))
         if visible:
             ec_list.append(EC.visibility_of_element_located((By.XPATH, xpath)))
 
@@ -253,30 +272,29 @@ class WebWorker(object):
         if len(ec_list) == 0:
             ec_list = None
 
-        waiter = WebDriverWait(self.driver, timeout_sec)
         element = None
-        for ec in ec_list:
+        if ec_list:
+            waiter = WebDriverWait(self.driver, timeout_sec)
+            for ec in ec_list:
+                try:
+                    element = waiter.until(ec, message='timeout for ec=%s'%ec)
+                except TimeoutException:
+                    print('Timeout when try to get element by xpath: ', xpath)
+                    break
+        else:
             try:
-                element = waiter.until(ec, message='timeout for ec=%s'%ec)
-            except TimeoutException:
-                print('Timeout when try to get element by xpath: ', xpath)
-                break
+                element = self.driver.find_element_by_xpath(xpath)
+            except Exception as e:
+                print('Error when try to get element by xpath: ', xpath)
         return element
 
 
     def parse_data(self, input_data):
-        # window_handles = self.driver.window_handles
-        # nrof_tab = len(window_handles)
-        # if nrof_tab >= 2:
-        #     for i in range(1, nrof_tab):
-        #         self.driver.switch_to_window(window_handles[i])
-        #         self.driver.close()
-        #     self.driver.switch_to_window(window_handles[0])
         if self.page_genomes_title not in self.driver.title:
             if not self.load_page(self.url_genomes):
                 return None
         else:
-            self.driver.refresh()
+            self.driver.refresh() ### if not refresh, right_click will break TODO: fix this bug.
 
         waiter = WebDriverWait(self.driver, 10)
         input_button = self.driver.find_element_by_class_name(self.input_button_class_name)
@@ -311,7 +329,7 @@ class WebWorker(object):
             time.sleep(0.5)
 
         for _ in range(10):
-            page_div = self.get_element(self.page_div_xpath)
+            page_div = self.get_element(self.page_div_xpath, 2, clickable=True)
             act = ActionChains(self.driver)
             act.context_click(page_div).perform()
             time.sleep(0.5)
@@ -322,7 +340,7 @@ class WebWorker(object):
             act = ActionChains(self.driver)
             act.move_to_element(blast_1).perform()
             act.send_keys(Keys.ARROW_RIGHT).perform()
-            blast_2 = self.get_element(self.blast_select_2_xpath, 2)
+            blast_2 = self.get_element(self.blast_select_2_xpath, 2, clickable=True)
             if blast_2 is None:
                 time.sleep(0.5)
                 continue
@@ -345,15 +363,21 @@ class WebWorker(object):
             return None
 
         self.driver.switch_to_window(self.driver.window_handles[1]) ### focus on new page
-        text_area = self.get_element(self.text_area_xpath, 60)
-        from_box = self.get_element(self.from_box_xpath, 1)
-        to_box = self.get_element(self.to_box_xpath, 1)
+        for _ in range(3):
+            text_area = self.get_element(self.text_area_xpath, 60, presence=True)
+            from_box = self.get_element(self.from_box_xpath, 1, presence=True)
+            to_box = self.get_element(self.to_box_xpath, 1, presence=True)
+            if text_area is None or from_box is None or to_box is None:
+                self.driver.refresh()
+            else:
+                break
 
         if text_area is None or from_box is None or to_box is None:
             self.driver.close()
+            self.driver.switch_to_window(self.driver.window_handles[0])
             return None
         data = [text_area.text, from_box.get_attribute('value'), to_box.get_attribute('value')]
-
+        # print('Three temp data: [text_area, from, to] = ', data)
         return data
 
     def parse_result(self, data):
@@ -372,8 +396,13 @@ class WebWorker(object):
         database_select.click()
         time.sleep(1)
         blast_button.click()
-        table = self.get_element(self.result_table_xpath, 120, visible=True) ### wait no more than 90 sec
-        result_panel = self.get_element(self.reult_panel_xpath, 10, visible=True) ### wait no more than 3 sec
+        for _ in range(3):
+            table = self.get_element(self.result_table_xpath, 120, visible=True) 
+            result_panel = self.get_element(self.reult_panel_xpath, 10, visible=True) 
+            if table is None:
+                self.driver.refresh()
+            else:
+                break
         if table is None:
             self.driver.close()
             return 'unknown'
@@ -401,8 +430,8 @@ class WebWorker(object):
         return result
 
     def __del__(self):
-        # if hasattr(self, 'driver'):
-        #     self.driver.quit()
+        if hasattr(self, 'driver'):
+            self.driver.quit()
         pass
 
 
@@ -413,9 +442,8 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--input-dir', type=str, default='.')
     parser.add_argument('-o', '--output-dir', type=str, default='../output')
     parser.add_argument('-ext', '--extension', type=str, default='xlsx')
-    parser.add_argument('-a', '--aug', type=str, choices=['train', 'val'], default='val')
     parser.add_argument('--headless', action='store_false', help='Whether to set headless mode.')
-    parser.add_argument('-p', '--pickle-file', type=str, default='../output/keys.pkl')
+    parser.add_argument('-p', '--pickle-file', type=str, default='../upload_data/keys.pkl')
     parser.add_argument('-exe', '--exe-path', type=str, default='chromedriver', help='For windows, input path of "chromedriver.exe"')
     parser.add_argument('--test', action='store_true', help='--test to processes only 1 excel in 1 process.')
     args = parser.parse_args()
@@ -436,7 +464,9 @@ if __name__ == '__main__':
 
     excel_paths = glob.glob(os.path.join(args.input_dir, '*.' + args.extension))
     if args.test:
-        excel_paths = excel_paths[:1]
+        nrof_excel = len(excel_paths)
+        n = random.choice(range(nrof_excel))
+        excel_paths = [excel_paths[n]]
     nrof_excel = len(excel_paths)
     print('Totally %2d excel found in %s' %(nrof_excel, args.input_dir))
     if nrof_excel:
@@ -446,19 +476,22 @@ if __name__ == '__main__':
             excel_paths = sorted(excel_paths)
             try:
                 func_args = [(excel, keys_dict_share, args.exe_path, args.headless, args.output_dir) for excel in excel_paths]
+                results = []
                 with multiprocessing.Pool(processes=nrof_excel) as pool:
                     results = pool.map(partial_wraper, func_args)
-                for res in results:
-                    for k, v in res.items():
-                        if v != 'unknown':
-                            keys_dict_share[k] = v                     
-                print('All done.')
             except Exception as e:
                 print(e)
                 traceback.print_stack()
             else:
                 pass
             finally:
+                ### update share_dict
+                for res in results:
+                    for k, v in res.items():
+                        if v != 'unknown':
+                            keys_dict_share[k] = v 
+                keys_dict_share = update_from_pkl(keys_dict_share, args.output_dir)                    
+                print('All done.')
                 with open(args.pickle_file, 'wb') as f:
                     pickle.dump(keys_dict_share, f)
                 print('Finishing update keys to ' + args.pickle_file)
