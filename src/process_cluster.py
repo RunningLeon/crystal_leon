@@ -105,8 +105,8 @@ def parse_arguments(argv):
   parser.add_argument('-i', '--dir-in', required=True, help='Input directory path')
   parser.add_argument('-o', '--dir-out', default='../output', help='Output directory path')
   parser.add_argument('-e', '--ext', default='.alt', help='File extensions.')
-  parser.add_argument('-m', '--min-samples', default=2, help='min samples per cluster.')
-  parser.add_argument('-n', '--min-dist', default=3, help='min dist of special samples to cluster.')
+  parser.add_argument('-m', '--min-samples', default=2, type=int, help='min samples per cluster.')
+  parser.add_argument('-n', '--min-dist', default=3, type=int, help='min dist of special samples to cluster.')
   return parser.parse_args(argv)
 
 
